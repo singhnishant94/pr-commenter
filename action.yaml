@@ -1,0 +1,149 @@
+name: 'Comment on PR'
+description: 'Comment on PR'
+author: 'singhnishant94'
+inputs:
+  comments_file: # change this
+    required: false
+    description: 'The file where comments are stored'
+runs:
+  using: 'composite'
+  steps:
+    - name: Install wget and coreutils
+      run: sudo apt-get update && sudo apt-get install -y wget && sudo apt-get install coreutils
+      shell: bash
+    - name: Install gh
+      run: |
+        sudo mkdir -p -m 755 /etc/apt/keyrings && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+          && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+          && sudo apt update \
+          && sudo apt install gh -y
+      shell: bash
+    - name: Comment on PR
+      run: |
+        # Initial API call to get the first page of comments
+        api_url="/repos/${{ github.repository }}/pulls/${{ github.event.number }}/comments"
+        page=1
+        per_page=30  # You can adjust this number up to a maximum of 100
+
+        # Loop through each page until there are no more pages
+        while : ; do
+            response=$(gh api -XGET $api_url -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" -F "per_page=$per_page" -F "page=$page")
+            jq -c '.[] | {path, line, body}' <<< "$response" >> temp.json
+
+            if [[ $response = "[]" ]]; then
+                break
+            fi
+
+            size_before=$size_after
+
+            ((page++))
+        done
+
+        # Check jq version to confirm jq is installed
+        jq --version || { echo "jq is not installed"; exit 1; }
+
+        declare -a existing_comments_array
+        while IFS= read -r item; do
+          existing_comments_array+=("$item")
+        done < temp.json
+
+        rm temp.json
+
+        # Arrays to hold comments for different actions
+        declare -a to_post
+        declare -a to_resolve
+
+        # Check each local comment against existing comments
+        while IFS= read -r local_comment; do
+            path=$(echo "$local_comment" | jq -r '.path')
+            position=$(echo "$local_comment" | jq -r '.line')
+            body=$(echo "$local_comment" | jq -r '.body')
+
+            echo "local comment: " $local_comment
+
+            if [[ "$path" == "" || "$position" == "" || "$body" == "" ]]; then
+              echo "Invalid comment. Skipping"
+              continue
+            fi
+
+            echo "Looking for a match in existing comments"
+            # Search local comments for a match
+            match_found="false"
+            for existing_comment in "${existing_comments_array[@]}"; do
+
+              existing_path=$(echo "$existing_comment" | jq -r '.path')
+              existing_position=$(echo "$existing_comment" | jq -r '.line')
+              existing_body=$(echo "$existing_comment" | jq -r '.body')
+
+
+              if [[ "$existing_path" == "$path" && "$existing_position" == "$position" && "$existing_body" == "$body" ]]; then
+                match_found="true"
+                break
+              fi
+            done
+
+            if [ $match_found = "false" ]; then
+                # Prepare to post this comment
+                to_post+=("$local_comment")
+            else
+              echo "Found an existing comment match. Not posting this comment"
+            fi
+
+        done <<< "$(jq -c '.[]' ${{ inputs.comments_file }})"
+
+        echo "To Post:"
+        printf "%s\n" "${to_post[@]}"
+
+        echo "len(to_post): " ${#to_post[@]}
+
+        if [[ ${#to_post[@]} == 0 ]]; then
+          echo "Nothing to comment. Exiting"
+          exit 0
+        fi
+
+        # Initialize an array to hold command parts
+        declare -a comment_args
+        i=0
+        # Ensure that each field is properly quoted to handle special characters
+        for item in "${to_post[@]}"; do
+          echo "item: $item"
+
+          body=$(echo "$item" | jq -r '.body')
+          path=$(echo "$item" | jq -r '.path')
+          line=$(echo "$item" | jq -r '.line')
+          side=$(echo "$item" | jq -r '.side')
+
+          # Append each comment's details to the comment_args array
+          comment_args+=("--field" "comments[][path]=$path")
+          comment_args+=("--field" "comments[][line]=$line")
+          comment_args+=("--field" "comments[][body]=$body")
+          comment_args+=("--field" "comments[][side]=$side")
+          
+          echo "iter: " $i "\n"
+
+          echo "Body: $body, Path: $path, Line: $line\n"
+
+          i+=1
+          echo "comment args so far: ${comment_args[@]}"
+        done
+
+        echo "comment args: ${comment_args[@]}"
+
+        # Use the array to pass all arguments to gh api
+        gh api /repos/${{ github.repository }}/pulls/${{ github.event.number }}/reviews \
+          --method POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: bearer ${{ secrets.GITHUB_TOKEN }}" \
+          -f "commit_id=${{ github.event.pull_request.head.sha }}" \
+          -f "body=Review completed. Please address the inline comments." \
+          -f "event=COMMENT" \
+          "${comment_args[@]}"
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash
+
+
+branding:
+  color: blue
+  icon: box
