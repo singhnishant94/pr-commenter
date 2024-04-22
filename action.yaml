@@ -2,7 +2,7 @@ name: 'Comment on PR'
 description: 'Comment on PR'
 author: 'singhnishant94'
 inputs:
-  comments_file: # change this
+  comments_file:
     required: false
     description: 'The file where comments are stored'
 runs:
